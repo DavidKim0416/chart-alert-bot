@@ -36,43 +36,64 @@ def send_telegram_message(text: str, target_chat_id: str = None):
 
 # 3. 실시간 가격 조회 및 대화형 Gemini 분석 함수 (현물/글로벌 호환 엔드포인트 적용)
 def analyze_requested_coin(ticker: str) -> str:
-    symbol = ticker.strip().upper()
-    if not symbol.endswith("USDT"):
-        symbol += "USDT"
-
-    # 바이낸스 현물 API (클라우드 IP 차단 없는 공용 엔드포인트)
+    clean_ticker = ticker.strip().upper().replace("USDT", "")
+    symbol = f"{clean_ticker}USDT"
+    
     last_price = None
     high_price = None
     low_price = None
-    vol = "0"
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-    }
+    price_info = ""
 
+    # 1차 시도: Coinbase API (클라우드 IP 차단 없음, 실시간성 최고)
     try:
-        # 1차: 바이낸스 글로벌 현물 24hr API 조회
-        url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
-        res = requests.get(url, headers=headers, timeout=5)
-        
-        # 현물에 없다면 2차: 선물 API 조회 시도
-        if res.status_code != 200:
-            fapi_url = f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={symbol}"
-            res = requests.get(fapi_url, headers=headers, timeout=5)
+        cb_res = requests.get(f"https://api.coinbase.com/v2/prices/{clean_ticker}-USD/spot", timeout=4)
+        if cb_res.status_code == 200:
+            last_price = float(cb_res.json()["data"]["amount"])
+            price_info = f"현재 실시간 체결가: {last_price:,.2f} USD"
+    except Exception:
+        pass
 
-        if res.status_code == 200:
-            d = res.json()
-            last_price = d.get("lastPrice")
-            high_price = d.get("highPrice")
-            low_price = d.get("lowPrice")
-            vol = d.get("quoteVolume", "0")
-            price_info = f"현재가: {last_price} USDT / 24h 고가: {high_price} / 24h 저가: {low_price} / 24h 거래대금: {float(vol):,.0f} USDT"
-        else:
-            # API 차단 또는 미상장 시 대체 처리: Gemini 자체 지식 기반 분석 수행
-            price_info = "실시간 호가 API 일시 지연 (최근 기술적 차트 구조 기반 분석 적용)"
+    # 2차 시도: Binance 글로벌 현물 API (Coinbase 실패 시)
+    if not last_price:
+        try:
+            bn_res = requests.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}", timeout=4)
+            if bn_res.status_code == 200:
+                d = bn_res.json()
+                last_price = float(d.get("lastPrice", 0))
+                high_price = float(d.get("highPrice", 0))
+                low_price = float(d.get("lowPrice", 0))
+                price_info = f"현재 체결가: {last_price:,.2f} USDT (24h 고가: {high_price:,.2f} / 24h 저가: {low_price:,.2f})"
+        except Exception:
+            pass
 
+    # 실시간 시세를 전혀 가져오지 못한 경우 임의 분석 방지
+    if not last_price:
+        return f"⚠️ '{clean_ticker}'의 실시간 거래소 시세를 가져오지 못했습니다. 잠시 후 다시 시도해 주세요."
+
+    prompt = f"""
+당신은 전문 가상자산 퀀트 트레이더입니다.
+[필수 지침]
+반드시 아래 제공된 실시간 기준 가격({last_price:,.2f})을 바탕으로 지지선, 저항선, 진입가, 익절가, 손절가를 오차 없이 산출하세요. 과거 기억이나 다른 가격대를 쓰면 안 됩니다.
+
+- 분석 종목: {clean_ticker}/USDT
+- 실시간 데이터: {price_info}
+
+아래 형식으로 간결하고 명확하게 한국어로 브리핑하세요:
+
+[ {clean_ticker} 실시간 전략 브리핑 ]
+• 기준 체결가: {last_price:,.2f} USDT
+1. 시장 모멘텀 및 구조 진단
+2. 단기 핵심 지지선 및 저항선
+3. 추천 예상 눌림목 진입 구간
+4. 목표 익절 구간 (1차 TP, 2차 TP)
+5. 손절 기준가 (SL)
+"""
+    try:
+        model = genai.GenerativeModel("gemini-3.8-flash")
+        response = model.generate_content(prompt)
+        return response.text
     except Exception as e:
-        price_info = f"실시간 데이터 수신 지연: {str(e)}"
+        return f"AI 분석 생성 중 오류: {str(e)}"
 
     prompt = f"""
     당신은 전문 가상자산 퀀트 트레이더입니다.
