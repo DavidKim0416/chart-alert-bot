@@ -172,8 +172,15 @@ def market_scanner_loop():
                     if trigger:
                         if symbol in ALERTED_COINS and (current_time - ALERTED_COINS[symbol]) < 7200:
                             continue
-                        report = analyze_requested_coin(symbol)
-                        msg = f"🔔 [변동성 긴급 감지]\n• 종목: {symbol}\n• 신호: {signal_text}\n\n{report}"
+
+                        # 스캐너는 AI를 호출하지 않고 실시간 수치 데이터만 텔레그램으로 즉시 발송 (비용 0원)
+                        msg = (
+                            f"🔔 *[24시 변동성 긴급 감지]*\n"
+                            f"• 종목: `{symbol}`\n"
+                            f"• 신호: *{signal_text}*\n"
+                            f"• 현재가: `{last_price}` (고가: {high_price} / 저가: {low_price})\n\n"
+                            f"👉 *상세 AI 퀀트 분석이 필요하시면 채팅방에 `{symbol}`을 입력하세요.*"
+                        )
                         send_telegram_message(msg)
                         ALERTED_COINS[symbol] = current_time
                         time.sleep(2)
