@@ -17,74 +17,100 @@ if GEMINI_KEY:
     genai.configure(api_key=GEMINI_KEY)
 
 # 2. 텔레그램 메시지 발송 함수
-def send_telegram_message(text: str, target_chat_id: str = None):
-    chat_id = target_chat_id or TG_CHAT_ID
-    if not TG_TOKEN or not chat_id:
-        return "Credentials missing"
-    
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text
-    }
-    try:
-        r = requests.post(url, json=payload, timeout=10)
-        return r.json()
-    except Exception as e:
-        print(f"Telegram Send Error: {e}")
-        return str(e)
-
-# 3. 실시간 가격 조회 및 대화형 Gemini 분석 함수 (현물/글로벌 호환 엔드포인트 적용)
 def analyze_requested_coin(ticker: str) -> str:
-    clean_ticker = ticker.strip().upper().replace("USDT", "")
-    symbol = f"{clean_ticker}USDT"
+    raw_input = ticker.strip().upper().replace("USDT", "")
     
+    # 1000 단위 심볼 자동 대응
+    variants = [raw_input]
+    if raw_input.startswith("1000"):
+        variants.append(raw_input.replace("1000", "", 1))
+    else:
+        variants.append(f"1000{raw_input}")
+
     last_price = None
     high_price = None
     low_price = None
-    price_info = ""
+    target_symbol = raw_input
+    source = ""
 
-    # 1차 시도: Coinbase API (클라우드 IP 차단 없음, 실시간성 최고)
-    try:
-        cb_res = requests.get(f"https://api.coinbase.com/v2/prices/{clean_ticker}-USD/spot", timeout=4)
-        if cb_res.status_code == 200:
-            last_price = float(cb_res.json()["data"]["amount"])
-            price_info = f"현재 실시간 체결가: {last_price:,.2f} USD"
-    except Exception:
-        pass
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
+    }
 
-    # 2차 시도: Binance 글로벌 현물 API (Coinbase 실패 시)
-    if not last_price:
+    # 1. CryptoCompare 공용 API (클라우드 IP 차단 제로, 바이낸스 선물 전종목 지원)
+    for v in variants:
         try:
-            bn_res = requests.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}", timeout=4)
-            if bn_res.status_code == 200:
-                d = bn_res.json()
-                last_price = float(d.get("lastPrice", 0))
-                high_price = float(d.get("highPrice", 0))
-                low_price = float(d.get("lowPrice", 0))
-                price_info = f"현재 체결가: {last_price:,.2f} USDT (24h 고가: {high_price:,.2f} / 24h 저가: {low_price:,.2f})"
+            cc_url = f"https://min-api.cryptocompare.com/data/pricemultifull?fsyms={v}&tsyms=USD,USDT"
+            r = requests.get(cc_url, headers=headers, timeout=3)
+            if r.status_code == 200:
+                res_data = r.json().get("RAW", {}).get(v, {})
+                quote = res_data.get("USDT") or res_data.get("USD")
+                if quote and quote.get("PRICE"):
+                    last_price = float(quote.get("PRICE"))
+                    high_price = float(quote.get("HIGHDAY", 0))
+                    low_price = float(quote.get("LOWDAY", 0))
+                    target_symbol = v
+                    source = "글로벌 통합 시세"
+                    break
         except Exception:
             pass
 
-    # 실시간 시세를 전혀 가져오지 못한 경우 임의 분석 방지
+    # 2. CoinGecko 선물/현물 통합 검색 (CryptoCompare 누락 시 백업)
     if not last_price:
-        return f"⚠️ '{clean_ticker}'의 실시간 거래소 시세를 가져오지 못했습니다. 잠시 후 다시 시도해 주세요."
+        for v in variants:
+            try:
+                cg_res = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={v.lower()}&vs_currencies=usd&include_24hr_high=true&include_24hr_low=true", headers=headers, timeout=3)
+                if cg_res.status_code == 200:
+                    data = cg_res.json()
+                    if v.lower() in data:
+                        d = data[v.lower()]
+                        last_price = float(d.get("usd", 0))
+                        high_price = float(d.get("usd_24h_high", 0))
+                        low_price = float(d.get("usd_24h_low", 0))
+                        target_symbol = v
+                        source = "CoinGecko"
+                        break
+            except Exception:
+                pass
 
+    # 3. 바이낸스 공식 퍼블릭 프록시 대체 엔드포인트 직접 조회
+    if not last_price:
+        for v in variants:
+            sym = f"{v}USDT"
+            try:
+                # 바이낸스 글로벌 mirror 엔드포인트
+                bn_url = f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={sym}"
+                res = requests.get(bn_url, headers=headers, timeout=3)
+                if res.status_code == 200:
+                    d = res.json()
+                    last_price = float(d.get("lastPrice", 0))
+                    high_price = float(d.get("highPrice", 0))
+                    low_price = float(d.get("lowPrice", 0))
+                    target_symbol = v
+                    source = "바이낸스"
+                    break
+            except Exception:
+                pass
+
+    if not last_price:
+        return f"⚠️ '{ticker}' 종목의 실시간 거래소 호가를 가져올 수 없습니다. 심볼명을 다시 확인해 주세요."
+
+    # Gemini 퀀트 브리핑 생성
     prompt = f"""
 당신은 전문 가상자산 퀀트 트레이더입니다.
 [필수 지침]
-반드시 아래 제공된 실시간 기준 가격({last_price:,.2f})을 바탕으로 지지선, 저항선, 진입가, 익절가, 손절가를 오차 없이 산출하세요. 과거 기억이나 다른 가격대를 쓰면 안 됩니다.
+반드시 전달받은 실시간 기준 가격({last_price:,.6f} USDT)을 기준으로 현재 시장 구조를 분석하고 지지선, 저항선, 진입가, 익절가, 손절가를 오차 없이 산출하세요.
 
-- 분석 종목: {clean_ticker}/USDT
-- 실시간 데이터: {price_info}
+- 분석 종목: {target_symbol}/USDT ({source})
+- 실시간 현재가: {last_price:,.6f} USDT (24h 고가: {high_price:,.6f} / 24h 저가: {low_price:,.6f})
 
-아래 형식으로 간결하고 명확하게 한국어로 브리핑하세요:
+아래 형식으로 명확하고 간결하게 한국어로 브리핑하세요:
 
-[ {clean_ticker} 실시간 전략 브리핑 ]
-• 기준 체결가: {last_price:,.2f} USDT
-1. 시장 모멘텀 및 구조 진단
+[ {target_symbol} 실시간 전략 브리핑 ]
+• 기준 체결가: {last_price:,.6f} USDT
+1. 모멘텀 및 차트 구조 진단
 2. 단기 핵심 지지선 및 저항선
-3. 추천 예상 눌림목 진입 구간
+3. 추천 예상 눌림목 진입 구간 (Pullback Entry)
 4. 목표 익절 구간 (1차 TP, 2차 TP)
 5. 손절 기준가 (SL)
 """
@@ -94,29 +120,6 @@ def analyze_requested_coin(ticker: str) -> str:
         return response.text
     except Exception as e:
         return f"AI 분석 생성 중 오류: {str(e)}"
-
-    prompt = f"""
-    당신은 전문 가상자산 퀀트 트레이더입니다.
-    사용자가 종목 분석을 요청했습니다:
-    - 종목: {symbol}
-    - 실시간 시장 데이터: {price_info}
-
-    아래 포맷에 맞추어 한국어로 명확하고 간결하게 브리핑해 주세요:
-
-    [ {symbol} 실시간 전략 브리핑 ]
-    1. 현재 시장 흐름 및 모멘텀 진단
-    2. 단기 핵심 지지선 및 저항선
-    3. 추천 예상 눌림목 진입 구간 (Pullback Entry)
-    4. 목표 익절 구간 (1차 TP, 2차 TP)
-    5. 칼손절 기준가 (Stop-Loss)
-    """
-    try:
-        model = genai.GenerativeModel("gemini-3.8-flash")
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"AI 분석 생성 중 오류: {str(e)}"
-
 
 
 # 비동기 분석 실행 함수
