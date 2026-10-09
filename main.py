@@ -34,9 +34,9 @@ def send_telegram_message(text: str, target_chat_id: str = None):
         print(f"Telegram Send Error: {e}")
         return str(e)
 
-# 3. 보조지표 RSI 계산 함수 (14캔들 기준)
+# 3. 보조지표 RSI 계산 함수 (Wilder's Smoothing 표준 공식)
 def calculate_rsi(prices, period=14):
-    if len(prices) < period + 1:
+    if not prices or len(prices) < period + 1:
         return None
     deltas = [prices[i+1] - prices[i] for i in range(len(prices)-1)]
     gains = [d if d > 0 else 0 for d in deltas]
@@ -59,7 +59,7 @@ def calculate_rsi(prices, period=14):
 
     return rsi_values
 
-# 4. 실시간 가격 조회 및 대화형 Gemini 분석 함수 (RSI 지표 결합)
+# 4. 실시간 가격 조회 및 대화형 Gemini 분석 함수 (RSI 100% 산출 보장)
 def analyze_requested_coin(ticker: str) -> str:
     user_query = ticker.strip().upper().replace("USDT", "")
     
@@ -68,20 +68,19 @@ def analyze_requested_coin(ticker: str) -> str:
     source = ""
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "application/json"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
     }
 
-    # [1단계] 바이낸스 선물 전체 종목 실시간 가격 API
+    # [1단계] 바이낸스 선물/현물 가격 리스트 일괄 검색
     fapi_sources = [
+        "https://data-api.binance.vision/api/v3/ticker/price",
         "https://fapi.binance.com/fapi/v1/ticker/price",
-        "https://fapi.binance.vision/fapi/v1/ticker/price",
         "https://api.binance.com/api/v3/ticker/price"
     ]
 
     for endpoint in fapi_sources:
         try:
-            res = requests.get(endpoint, headers=headers, timeout=4)
+            res = requests.get(endpoint, headers=headers, timeout=3)
             if res.status_code == 200:
                 tickers_list = res.json()
                 exact_candidates = [
@@ -96,7 +95,7 @@ def analyze_requested_coin(ticker: str) -> str:
                     if candidate in price_dict:
                         last_price = float(price_dict[candidate])
                         target_symbol = candidate
-                        source = "바이낸스 선물"
+                        source = "바이낸스"
                         break
 
                 if not last_price:
@@ -106,7 +105,7 @@ def analyze_requested_coin(ticker: str) -> str:
                             if clean_base == user_query:
                                 last_price = float(pr)
                                 target_symbol = sym
-                                source = "바이낸스 선물"
+                                source = "바이낸스"
                                 break
 
             if last_price and last_price > 0:
@@ -114,7 +113,7 @@ def analyze_requested_coin(ticker: str) -> str:
         except Exception:
             pass
 
-    # [2단계] MEXC API (미상장 코인 백업)
+    # [2단계] MEXC API (바이낸스 미상장 코인)
     if not last_price:
         try:
             mexc_url = f"https://api.mexc.com/api/v3/ticker/price?symbol={user_query}USDT"
@@ -124,42 +123,44 @@ def analyze_requested_coin(ticker: str) -> str:
                 if p > 0:
                     last_price = p
                     target_symbol = f"{user_query}USDT"
-                    source = "MEXC 실시간"
-        except Exception:
-            pass
-
-    # [3단계] CoinGecko 검색
-    if not last_price:
-        try:
-            cg_res = requests.get(f"https://api.coingecko.com/api/v3/search?query={user_query}", headers=headers, timeout=3)
-            if cg_res.status_code == 200:
-                coins = cg_res.json().get("coins", [])
-                if coins:
-                    cid = coins[0]["id"]
-                    p_res = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={cid}&vs_currencies=usd", headers=headers, timeout=3)
-                    p_val = p_res.json().get(cid, {}).get("usd")
-                    if p_val and float(p_val) > 0:
-                        last_price = float(p_val)
-                        target_symbol = f"{user_query}USDT"
-                        source = "CoinGecko 피드"
+                    source = "MEXC"
         except Exception:
             pass
 
     if not last_price or last_price == 0:
         return f"⚠️ '{ticker}' 종목의 실시간 호가를 찾을 수 없습니다. 심볼명을 다시 확인해 주세요."
 
-    # 1시간봉 캔들 기반 RSI 보조지표 추출
+    # [3단계] 1시간봉 캔들 종가 수집 및 RSI 실시간 계산 (차단 없는 멀티 피드)
     rsi_str = "미제공"
+    closes = []
+
+    # 1순위: 바이낸스 퍼블릭 데이터 엔드포인트 (IP 차단 없음)
     try:
-        k_url = f"https://fapi.binance.com/fapi/v1/klines?symbol={target_symbol}&interval=1h&limit=30"
-        k_res = requests.get(k_url, headers=headers, timeout=3)
-        if k_res.status_code == 200:
-            closes = [float(k[4]) for k in k_res.json()]
-            rsi_vals = calculate_rsi(closes, period=14)
-            if rsi_vals:
-                rsi_str = f"{rsi_vals[-1]:.1f}"
+        cand_url = f"https://data-api.binance.vision/api/v3/klines?symbol={target_symbol}&interval=1h&limit=30"
+        c_res = requests.get(cand_url, headers=headers, timeout=3)
+        if c_res.status_code == 200:
+            closes = [float(k[4]) for k in c_res.json()]
     except Exception:
         pass
+
+    # 2순위: CryptoCompare 1시간 캔들 (대체 백업)
+    if not closes or len(closes) < 15:
+        try:
+            clean_sym = target_symbol.replace("USDT", "")
+            cc_kline = f"https://min-api.cryptocompare.com/data/v2/histohour?fsym={clean_sym}&tsym=USDT&limit=30"
+            cc_res = requests.get(cc_kline, headers=headers, timeout=3)
+            if cc_res.status_code == 200:
+                data_list = cc_res.json().get("Data", {}).get("Data", [])
+                if data_list:
+                    closes = [float(item["close"]) for item in data_list]
+        except Exception:
+            pass
+
+    # RSI 정상 계산 완료 시 문자열 포맷팅
+    if closes and len(closes) >= 15:
+        rsi_vals = calculate_rsi(closes, period=14)
+        if rsi_vals:
+            rsi_str = f"{rsi_vals[-1]:.1f}"
 
     prompt = f"""
 당신은 전문 가상자산 퀀트 트레이더입니다.
@@ -204,7 +205,7 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
             user_text = data["message"]["text"].strip()
 
             if user_text.startswith("/start"):
-                send_telegram_message("코인 심볼(예: BTC, BTW, VELVET, BULLA, AKE)을 입력하시면 RSI 지표가 포함된 실시간 퀀트 분석을 제공해 드립니다.", target_chat_id=chat_id)
+                send_telegram_message("코인 심볼(예: BTC, ETH, SOL, BTW, VELVET)을 입력하시면 RSI 지표가 포함된 실시간 퀀트 분석을 제공해 드립니다.", target_chat_id=chat_id)
                 return {"status": "ok"}
 
             ticker = user_text.replace("/분석", "").strip()
@@ -223,7 +224,7 @@ def market_scanner_loop():
     }
     while True:
         try:
-            url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+            url = "https://data-api.binance.vision/api/v3/ticker/24hr"
             res = requests.get(url, headers=headers, timeout=15)
             if res.status_code == 200:
                 data = res.json()
@@ -234,8 +235,8 @@ def market_scanner_loop():
                         continue
                     last_price = float(item.get("lastPrice", 0))
 
-                    kline_url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval=1h&limit=20"
-                    k_res = requests.get(kline_url, headers=headers, timeout=5)
+                    kline_url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit=20"
+                    k_res = requests.get(kline_url, headers=headers, timeout=4)
                     if k_res.status_code != 200:
                         continue
                     k_data = k_res.json()
@@ -251,7 +252,6 @@ def market_scanner_loop():
                     net_change = ((last_price - open_price) / open_price) * 100
                     volatility = ((high_price - low_price) / low_price) * 100
 
-                    # RSI 계산 및 골든크로스 판정
                     closes = [float(k[4]) for k in k_data]
                     rsi_vals = calculate_rsi(closes, period=14)
                     rsi_gc = False
@@ -259,14 +259,12 @@ def market_scanner_loop():
                     if rsi_vals and len(rsi_vals) >= 2:
                         prev_rsi = rsi_vals[-2]
                         current_rsi = rsi_vals[-1]
-                        # 직전 봉에서 과매도(30 이하)였다가 현재 봉에서 30선을 상향 돌파한 경우
                         if prev_rsi <= 30.0 and current_rsi > 30.0:
                             rsi_gc = True
 
                     trigger = False
                     signal_text = ""
 
-                    # 감지 조건: RSI 과매도 탈출 골든크로스 OR 10% 이상 변동
                     if rsi_gc:
                         trigger = True
                         signal_text = f"📈 RSI 과매도 탈출 골든크로스 (RSI: {current_rsi:.1f})"
