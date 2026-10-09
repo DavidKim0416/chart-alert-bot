@@ -59,7 +59,7 @@ def calculate_rsi(prices, period=14):
 
     return rsi_values
 
-# 4. 실시간 가격 조회 및 대화형 Gemini 분석 함수 (RSI 100% 산출 보장)
+# 4. 실시간 가격 조회 및 대화형 Gemini 분석 함수 (RSI 결합)
 def analyze_requested_coin(ticker: str) -> str:
     user_query = ticker.strip().upper().replace("USDT", "")
     
@@ -68,7 +68,8 @@ def analyze_requested_coin(ticker: str) -> str:
     source = ""
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json"
     }
 
     # [1단계] 바이낸스 선물/현물 가격 리스트 일괄 검색
@@ -130,11 +131,10 @@ def analyze_requested_coin(ticker: str) -> str:
     if not last_price or last_price == 0:
         return f"⚠️ '{ticker}' 종목의 실시간 호가를 찾을 수 없습니다. 심볼명을 다시 확인해 주세요."
 
-    # [3단계] 1시간봉 캔들 종가 수집 및 RSI 실시간 계산 (차단 없는 멀티 피드)
+    # [3단계] 1시간봉 캔들 종가 수집 및 RSI 실시간 계산
     rsi_str = "미제공"
     closes = []
 
-    # 1순위: 바이낸스 퍼블릭 데이터 엔드포인트 (IP 차단 없음)
     try:
         cand_url = f"https://data-api.binance.vision/api/v3/klines?symbol={target_symbol}&interval=1h&limit=30"
         c_res = requests.get(cand_url, headers=headers, timeout=3)
@@ -143,7 +143,6 @@ def analyze_requested_coin(ticker: str) -> str:
     except Exception:
         pass
 
-    # 2순위: CryptoCompare 1시간 캔들 (대체 백업)
     if not closes or len(closes) < 15:
         try:
             clean_sym = target_symbol.replace("USDT", "")
@@ -156,7 +155,6 @@ def analyze_requested_coin(ticker: str) -> str:
         except Exception:
             pass
 
-    # RSI 정상 계산 완료 시 문자열 포맷팅
     if closes and len(closes) >= 15:
         rsi_vals = calculate_rsi(closes, period=14)
         if rsi_vals:
@@ -215,7 +213,7 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
         print(f"Telegram webhook handling error: {e}")
     return {"status": "ok"}
 
-# 7. 24시간 자동 스캐너 (10% 변동성 + RSI 골든크로스 감지)
+# 7. 24시간 자동 스캐너 (15% 변동성 + RSI 골든크로스 감지)
 ALERTED_COINS = {}
 
 def market_scanner_loop():
@@ -252,6 +250,7 @@ def market_scanner_loop():
                     net_change = ((last_price - open_price) / open_price) * 100
                     volatility = ((high_price - low_price) / low_price) * 100
 
+                    # RSI 계산 및 골든크로스 판정
                     closes = [float(k[4]) for k in k_data]
                     rsi_vals = calculate_rsi(closes, period=14)
                     rsi_gc = False
@@ -265,14 +264,15 @@ def market_scanner_loop():
                     trigger = False
                     signal_text = ""
 
+                    # 감지 기준: RSI 골든크로스 OR 15% 이상 급등락/변동폭
                     if rsi_gc:
                         trigger = True
                         signal_text = f"📈 RSI 과매도 탈출 골든크로스 (RSI: {current_rsi:.1f})"
-                    elif abs(net_change) >= 10.0:
+                    elif abs(net_change) >= 15.0:
                         trigger = True
                         direction = "🚀 1시간 급등" if net_change > 0 else "🩸 1시간 급락"
                         signal_text = f"{direction} ({net_change:+.2f}%)"
-                    elif volatility >= 10.0:
+                    elif volatility >= 15.0:
                         trigger = True
                         signal_text = f"⚡ 거대 스파이크 (고저폭: {volatility:.2f}%, 변동: {net_change:+.2f}%)"
 
