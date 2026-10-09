@@ -19,17 +19,23 @@ if GEMINI_KEY:
 # 2. 텔레그램 메시지 발송 함수
 def send_telegram_message(text: str):
     if not TG_TOKEN or not TG_CHAT_ID:
-        return
+        print("Telegram Token or Chat ID is missing!")
+        return "Telegram credentials missing"
+    
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = {
         "chat_id": TG_CHAT_ID,
-        "text": text,
-        "parse_mode": "Markdown"
+        "text": text
+        # parse_mode를 제거하여 AI 응답 내 특수기호로 인한 전송 실패 방지
     }
     try:
-        requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json=payload, timeout=10)
+        res_json = r.json()
+        print(f"Telegram response: {res_json}")
+        return res_json
     except Exception as e:
         print(f"Telegram Send Error: {e}")
+        return str(e)
 
 # 3. Gemini 3.8 Flash 시장 분석 함수
 def analyze_with_gemini(ticker: str, signal: str, price: str) -> str:
@@ -142,6 +148,6 @@ def health_check():
 @app.post("/webhook")
 def receive_webhook(data: AlertData):
     analysis = analyze_with_gemini(data.ticker, data.signal, data.price)
-    msg = f"🔔 *[트레이딩뷰 얼럿 감지]*\n• 종목: `{data.ticker}`\n• 신호: *{data.signal}*\n• 가격: `{data.price}`\n\n📊 *Gemini AI 분석:*\n{analysis}"
-    send_telegram_message(msg)
-    return {"status": "success"}
+    msg = f"🔔 [차트 얼럿 감지]\n• 종목: {data.ticker}\n• 신호: {data.signal}\n• 가격: {data.price}\n\n📊 Gemini AI 분석:\n{analysis}"
+    tg_result = send_telegram_message(msg)
+    return {"status": "success", "telegram_result": tg_result}
