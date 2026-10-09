@@ -1,4 +1,4 @@
-충분히 공감합니다. 부분 수정은 줄바꿈이나 들여쓰기(indentation) 실수가 발생하기 쉽기 때문에, 전체 코드를 복사해서 통째로 덮어쓰는 것(Ctrl+A $\to$ Ctrl+V)이 가장 안전하고 오류를 방지하는 확실한 방법입니다.앞으로는 수정 사항이 있을 때마다 고민하실 필요 없이 그대로 전체 덮어쓰기하실 수 있도록 완성된 전체 코드로만 제공해 드리겠습니다.main.py 전체 완성형 코드 (AKE / BULLA 등 신규·선물 알트코인 지원)GitHub의 chart-alert-bot 저장소에서 main.py 파일을 열고 연필 아이콘(편집)을 누른 뒤, Ctrl + A(전체 선택) $\to$ Delete로 비우고 아래 코드를 그대로 붙여넣어 주세요.Pythonimport os
+import os
 import time
 import threading
 import requests
@@ -38,7 +38,6 @@ def send_telegram_message(text: str, target_chat_id: str = None):
 def analyze_requested_coin(ticker: str) -> str:
     raw_input = ticker.strip().upper().replace("USDT", "")
     
-    # 1000, 1000000 단위 및 기본 심볼 변형 리스트 자동 생성
     variants = [
         raw_input,
         f"1000{raw_input}",
