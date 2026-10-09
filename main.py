@@ -2,7 +2,7 @@ import os
 import time
 import threading
 import requests
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from pydantic import BaseModel
 import google.generativeai as genai
 
@@ -17,139 +17,152 @@ if GEMINI_KEY:
     genai.configure(api_key=GEMINI_KEY)
 
 # 2. 텔레그램 메시지 발송 함수
-def send_telegram_message(text: str):
-    if not TG_TOKEN or not TG_CHAT_ID:
-        print("Telegram Token or Chat ID is missing!")
-        return "Telegram credentials missing"
+def send_telegram_message(text: str, target_chat_id: str = None):
+    chat_id = target_chat_id or TG_CHAT_ID
+    if not TG_TOKEN or not chat_id:
+        return "Credentials missing"
     
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TG_CHAT_ID,
+        "chat_id": chat_id,
         "text": text
-        # parse_mode를 제거하여 AI 응답 내 특수기호로 인한 전송 실패 방지
     }
     try:
         r = requests.post(url, json=payload, timeout=10)
-        res_json = r.json()
-        print(f"Telegram response: {res_json}")
-        return res_json
+        return r.json()
     except Exception as e:
         print(f"Telegram Send Error: {e}")
         return str(e)
 
-# 3. Gemini 3.8 Flash 시장 분석 함수
-def analyze_with_gemini(ticker: str, signal: str, price: str) -> str:
+# 3. 실시간 가격 조회 및 대화형 Gemini 분석 함수
+def analyze_requested_coin(ticker: str) -> str:
+    symbol = ticker.strip().upper()
+    if not symbol.endswith("USDT"):
+        symbol += "USDT"
+
+    # 바이낸스 선물 시세 및 24시간 통계 조회
+    price_info = "시세 조회 실패 (기준가 불명)"
+    try:
+        ticker_url = f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={symbol}"
+        res = requests.get(ticker_url, timeout=5)
+        if res.status_code == 200:
+            d = res.json()
+            last_price = d.get("lastPrice")
+            high_price = d.get("highPrice")
+            low_price = d.get("lowPrice")
+            vol = d.get("quoteVolume")
+            price_info = f"현재가: {last_price} USDT / 24h 고가: {high_price} / 24h 저가: {low_price} / 24h 거래대금: {float(vol):,.0f} USDT"
+    except Exception as e:
+        print(f"Price fetch error: {e}")
+
     prompt = f"""
     당신은 전문 가상자산 퀀트 트레이더입니다.
-    현재 암호화폐 시장에서 다음 신호가 감지되었습니다:
-    - 종목: {ticker}
-    - 감지된 신호: {signal}
-    - 현재가: {price}
+    사용자가 종목 분석을 요청했습니다:
+    - 종목: {symbol}
+    - 실시간 시장 데이터: {price_info}
 
-    다음 형식에 맞춰 핵심만 한국어로 간결하게 브리핑해주세요:
-    1. 시장 상태 요약 (급등/급락 원인 및 모멘텀)
-    2. 단기 지지선 및 저항선 가격대 제시
-    3. 추천 대응 전략 (돌파 추종 / 조정 매수 / 관망 등)
-    4. 손절 기준 가격 제시
+    아래 포맷에 맞추어 한국어로 명확하고 간결하게 브리핑해 주세요:
+
+    [ {symbol} 실시간 전략 브리핑 ]
+    1. 현재 시장 흐름 및 모멘텀 진단
+    2. 단기 핵심 지지선 및 저항선
+    3. 추천 예상 눌림목 진입 구간 (Pullback Entry)
+    4. 목표 익절 구간 (1차 TP, 2차 TP)
+    5. 칼손절 기준가 (Stop-Loss)
     """
     try:
         model = genai.GenerativeModel("gemini-3.8-flash")
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"분석 생성 중 오류: {str(e)}"
+        return f"분석 오류 발생: {str(e)}"
 
-# 4. 전체 시장 1시간 변동률 24시간 자동 감시 스레드 (Binance USDT 선물 기준)
-ALERTED_COINS = {}  # 동일 코인 중복 알림 방지 캐시 (심볼: 마지막 알림 타임스탬프)
+# 4. 텔레그램 채팅 수신 엔드포인트 (사용자 입력 처리)
+@app.post("/telegram-webhook")
+async def telegram_webhook(request: Request):
+    try:
+        data = await request.json()
+        if "message" in data and "text" in data["message"]:
+            chat_id = str(data["message"]["chat"]["id"])
+            user_text = data["message"]["text"].strip()
+
+            # /start 명령어 처리
+            if user_text.startswith("/start"):
+                send_telegram_message("코인 심볼(예: BTC, ETH, SOL)을 입력하시면 실시간 지지/저항, 예상 눌림목, 목표 익절가를 분석해 드립니다.", target_chat_id=chat_id)
+                return {"status": "ok"}
+
+            # /분석 BTC 또는 단순 BTC 입력 대응
+            ticker = user_text.replace("/분석", "").strip()
+            if ticker:
+                send_telegram_message(f"🔍 {ticker.upper()} 실시간 데이터 및 호가 분석 중입니다. 잠시만 기다려주세요...", target_chat_id=chat_id)
+                report = analyze_requested_coin(ticker)
+                send_telegram_message(report, target_chat_id=chat_id)
+    except Exception as e:
+        print(f"Telegram webhook handling error: {e}")
+    return {"status": "ok"}
+
+# 5. 기존 24시간 자동 스캐너 백그라운드 스레드
+ALERTED_COINS = {}
 
 def market_scanner_loop():
-    print("Market Scanner Thread Started...")
     while True:
         try:
-            # 바이낸스 USDT 선물 전체 종목의 캔들 데이터 조회 (1시간 변동 감지)
             url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
             res = requests.get(url, timeout=15)
-            
             if res.status_code == 200:
                 data = res.json()
                 current_time = time.time()
-
                 for item in data:
                     symbol = item.get("symbol", "")
                     if not symbol.endswith("USDT"):
                         continue
-
-                    # 최근 1시간(60분) 변동률 정밀 계산 (1시간봉 시가 대비 현재가)
-                    # 24hr 데이터 중 최근 급변 종목을 선별하여 1시간 캔들 상세 검증
                     last_price = float(item.get("lastPrice", 0))
-                    
-                    # 1시간봉 1개 조회
+
                     kline_url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval=1h&limit=1"
                     k_res = requests.get(kline_url, timeout=5)
                     if k_res.status_code != 200:
                         continue
-                    
                     k_data = k_res.json()
                     if not k_data:
                         continue
-                    
-                    # [캔들 데이터 구조: 1:시가, 2:고가, 3:저가, 4:종가]
+
                     open_price = float(k_data[0][1])
                     high_price = float(k_data[0][2])
                     low_price = float(k_data[0][3])
-                    
                     if open_price == 0 or low_price == 0:
                         continue
 
-                    # 1. 시가 대비 현재가 변동률 (일반 추세형 급등락)
                     net_change = ((last_price - open_price) / open_price) * 100
-                    
-                    # 2. 1시간 내 최대 진폭 계산 (순간 급등락 롤러코스터 감지)
                     volatility = ((high_price - low_price) / low_price) * 100
 
                     trigger = False
                     signal_text = ""
-
-                    # 조건 A: 순수 변동률이 +-15% 이상일 때
                     if abs(net_change) >= 15.0:
                         trigger = True
                         direction = "🚀 1시간 급등" if net_change > 0 else "🩸 1시간 급락"
-                        signal_text = f"{direction} (변동률: {net_change:+.2f}%)"
-
-                    # 조건 B: 시가 대비 변동은 적으나, 순간적으로 15% 이상 튀었다가 빠진 경우 (스파이크)
+                        signal_text = f"{direction} ({net_change:+.2f}%)"
                     elif volatility >= 15.0:
                         trigger = True
-                        signal_text = f"⚡ 1시간 내 거대 변동성/스파이크 발생 (고저 진폭: {volatility:.2f}%, 현재 변동: {net_change:+.2f}%)"
+                        signal_text = f"⚡ 거대 스파이크 (고저폭: {volatility:.2f}%, 변동: {net_change:+.2f}%)"
 
                     if trigger:
                         if symbol in ALERTED_COINS and (current_time - ALERTED_COINS[symbol]) < 7200:
                             continue
-
-                        analysis = analyze_with_gemini(symbol, signal_text, str(last_price))
-                        msg = (
-                            f"🔔 [변동성 긴급 감지]\n"
-                            f"• 종목: {symbol}\n"
-                            f"• 상태: {signal_text}\n"
-                            f"• 현재가: {last_price} (고가: {high_price} / 저가: {low_price})\n\n"
-                            f"📊 Gemini AI 분석:\n{analysis}"
-                        )
+                        report = analyze_requested_coin(symbol)
+                        msg = f"🔔 [변동성 긴급 감지]\n• 종목: {symbol}\n• 신호: {signal_text}\n\n{report}"
                         send_telegram_message(msg)
                         ALERTED_COINS[symbol] = current_time
                         time.sleep(2)
-
         except Exception as e:
             print(f"Scanner Loop Error: {e}")
-
-        # 60초 대기 후 다음 전체 스캔
         time.sleep(60)
 
-# 서버 시작 시 백그라운드에서 스캐너 자동 실행
 @app.on_event("startup")
 def startup_event():
     t = threading.Thread(target=market_scanner_loop, daemon=True)
     t.start()
 
-# 5. 기존 트레이딩뷰 수동 웹훅 수신용 엔드포인트도 동시 유지
+# 6. 트레이딩뷰 웹훅 연동 엔드포인트
 class AlertData(BaseModel):
     ticker: str
     signal: str
@@ -157,11 +170,11 @@ class AlertData(BaseModel):
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Market Scanner & Webhook Bot Running"}
+    return {"status": "ok", "message": "Bot is running"}
 
 @app.post("/webhook")
 def receive_webhook(data: AlertData):
-    analysis = analyze_with_gemini(data.ticker, data.signal, data.price)
-    msg = f"🔔 [차트 얼럿 감지]\n• 종목: {data.ticker}\n• 신호: {data.signal}\n• 가격: {data.price}\n\n📊 Gemini AI 분석:\n{analysis}"
-    tg_result = send_telegram_message(msg)
-    return {"status": "success", "telegram_result": tg_result}
+    report = analyze_requested_coin(data.ticker)
+    msg = f"🔔 [트레이딩뷰 얼럿 감지]\n• 종목: {data.ticker}\n• 신호: {data.signal}\n• 가격: {data.price}\n\n{report}"
+    send_telegram_message(msg)
+    return {"status": "success"}
