@@ -90,7 +90,7 @@ def analyze_requested_coin(ticker: str) -> str:
     5. 칼손절 기준가 (Stop-Loss)
     """
     try:
-        model = genai.GenerativeModel("gemini-3.8-flash")
+        model = genai.GenerativeModel("gemini-2.5-flash")
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
