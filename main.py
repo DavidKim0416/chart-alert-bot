@@ -17,7 +17,11 @@ def send_telegram(text):
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Bot is running"}
+    try:
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        return {"status": "ok", "available_models": models}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.post("/webhook")
 async def tradingview_webhook(request: Request):
