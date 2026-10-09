@@ -42,7 +42,7 @@ async def tradingview_webhook(request: Request):
     """
 
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash-latest")
+        model = genai.GenerativeModel("gemini-pro-flash-latest")
         response = model.generate_content(prompt)
         analysis_result = response.text
 
