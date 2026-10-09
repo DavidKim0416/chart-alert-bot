@@ -17,10 +17,27 @@ if GEMINI_KEY:
     genai.configure(api_key=GEMINI_KEY)
 
 # 2. 텔레그램 메시지 발송 함수
+def send_telegram_message(text: str, target_chat_id: str = None):
+    chat_id = target_chat_id or TG_CHAT_ID
+    if not TG_TOKEN or not chat_id:
+        return "Credentials missing"
+    
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text
+    }
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+        return r.json()
+    except Exception as e:
+        print(f"Telegram Send Error: {e}")
+        return str(e)
+
+# 3. 실시간 가격 조회 및 대화형 Gemini 분석 함수
 def analyze_requested_coin(ticker: str) -> str:
     raw_input = ticker.strip().upper().replace("USDT", "")
     
-    # 1000 단위 심볼 자동 대응
     variants = [raw_input]
     if raw_input.startswith("1000"):
         variants.append(raw_input.replace("1000", "", 1))
@@ -37,7 +54,7 @@ def analyze_requested_coin(ticker: str) -> str:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
     }
 
-    # 1. CryptoCompare 공용 API (클라우드 IP 차단 제로, 바이낸스 선물 전종목 지원)
+    # 1차: CryptoCompare (클라우드 IP 차단 없음)
     for v in variants:
         try:
             cc_url = f"https://min-api.cryptocompare.com/data/pricemultifull?fsyms={v}&tsyms=USD,USDT"
@@ -50,35 +67,16 @@ def analyze_requested_coin(ticker: str) -> str:
                     high_price = float(quote.get("HIGHDAY", 0))
                     low_price = float(quote.get("LOWDAY", 0))
                     target_symbol = v
-                    source = "글로벌 통합 시세"
+                    source = "글로벌 시세"
                     break
         except Exception:
             pass
 
-    # 2. CoinGecko 선물/현물 통합 검색 (CryptoCompare 누락 시 백업)
-    if not last_price:
-        for v in variants:
-            try:
-                cg_res = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={v.lower()}&vs_currencies=usd&include_24hr_high=true&include_24hr_low=true", headers=headers, timeout=3)
-                if cg_res.status_code == 200:
-                    data = cg_res.json()
-                    if v.lower() in data:
-                        d = data[v.lower()]
-                        last_price = float(d.get("usd", 0))
-                        high_price = float(d.get("usd_24h_high", 0))
-                        low_price = float(d.get("usd_24h_low", 0))
-                        target_symbol = v
-                        source = "CoinGecko"
-                        break
-            except Exception:
-                pass
-
-    # 3. 바이낸스 공식 퍼블릭 프록시 대체 엔드포인트 직접 조회
+    # 2차: Binance 글로벌 퍼블릭 Mirror API
     if not last_price:
         for v in variants:
             sym = f"{v}USDT"
             try:
-                # 바이낸스 글로벌 mirror 엔드포인트
                 bn_url = f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={sym}"
                 res = requests.get(bn_url, headers=headers, timeout=3)
                 if res.status_code == 200:
@@ -87,19 +85,18 @@ def analyze_requested_coin(ticker: str) -> str:
                     high_price = float(d.get("highPrice", 0))
                     low_price = float(d.get("lowPrice", 0))
                     target_symbol = v
-                    source = "바이낸스"
+                    source = "Binance"
                     break
             except Exception:
                 pass
 
     if not last_price:
-        return f"⚠️ '{ticker}' 종목의 실시간 거래소 호가를 가져올 수 없습니다. 심볼명을 다시 확인해 주세요."
+        return f"⚠️ '{ticker}' 종목의 실시간 호가를 가져올 수 없습니다. 심볼명을 다시 확인해 주세요."
 
-    # Gemini 퀀트 브리핑 생성
     prompt = f"""
 당신은 전문 가상자산 퀀트 트레이더입니다.
 [필수 지침]
-반드시 전달받은 실시간 기준 가격({last_price:,.6f} USDT)을 기준으로 현재 시장 구조를 분석하고 지지선, 저항선, 진입가, 익절가, 손절가를 오차 없이 산출하세요.
+반드시 전달받은 실시간 기준 가격({last_price:,.6f} USDT)을 기준으로 현재 차트 구조를 분석하고 지지선, 저항선, 진입가, 익절가, 손절가를 산출하세요.
 
 - 분석 종목: {target_symbol}/USDT ({source})
 - 실시간 현재가: {last_price:,.6f} USDT (24h 고가: {high_price:,.6f} / 24h 저가: {low_price:,.6f})
@@ -121,14 +118,13 @@ def analyze_requested_coin(ticker: str) -> str:
     except Exception as e:
         return f"AI 분석 생성 중 오류: {str(e)}"
 
-
-# 비동기 분석 실행 함수
+# 4. 비동기 분석 실행 함수
 def process_coin_analysis(ticker: str, chat_id: str):
-    send_telegram_message(f"🔍 {ticker.upper()} 실시간 데이터 및 호가 분석 중입니다...", target_chat_id=chat_id)
+    send_telegram_message(f"🔍 {ticker.upper()} 실시간 호가 및 퀀트 분석 중입니다...", target_chat_id=chat_id)
     report = analyze_requested_coin(ticker)
     send_telegram_message(report, target_chat_id=chat_id)
 
-# 4. 텔레그램 채팅 수신 엔드포인트 (타임아웃 방지 백그라운드 태스크)
+# 5. 텔레그램 채팅 수신 엔드포인트
 @app.post("/telegram-webhook")
 async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     try:
@@ -143,13 +139,12 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
 
             ticker = user_text.replace("/분석", "").strip()
             if ticker:
-                # 텔레그램 타임아웃을 막기 위해 분석 작업을 백그라운드로 넘기고 즉시 200 OK 반환
                 background_tasks.add_task(process_coin_analysis, ticker, chat_id)
     except Exception as e:
         print(f"Telegram webhook handling error: {e}")
     return {"status": "ok"}
 
-# 5. 기존 24시간 자동 스캐너 백그라운드 스레드
+# 6. 기존 24시간 자동 스캐너 백그라운드 스레드
 ALERTED_COINS = {}
 
 def market_scanner_loop():
@@ -197,13 +192,12 @@ def market_scanner_loop():
                         if symbol in ALERTED_COINS and (current_time - ALERTED_COINS[symbol]) < 7200:
                             continue
 
-                        # 스캐너는 AI를 호출하지 않고 실시간 수치 데이터만 텔레그램으로 즉시 발송 (비용 0원)
                         msg = (
-                            f"🔔 *[24시 변동성 긴급 감지]*\n"
-                            f"• 종목: `{symbol}`\n"
-                            f"• 신호: *{signal_text}*\n"
-                            f"• 현재가: `{last_price}` (고가: {high_price} / 저가: {low_price})\n\n"
-                            f"👉 *상세 AI 퀀트 분석이 필요하시면 채팅방에 `{symbol}`을 입력하세요.*"
+                            f"🔔 [24시 변동성 긴급 감지]\n"
+                            f"• 종목: {symbol}\n"
+                            f"• 신호: {signal_text}\n"
+                            f"• 현재가: {last_price} (고가: {high_price} / 저가: {low_price})\n\n"
+                            f"👉 상세 AI 퀀트 분석이 필요하시면 채팅방에 '{symbol.replace('USDT', '')}'를 입력하세요."
                         )
                         send_telegram_message(msg)
                         ALERTED_COINS[symbol] = current_time
@@ -217,7 +211,7 @@ def startup_event():
     t = threading.Thread(target=market_scanner_loop, daemon=True)
     t.start()
 
-# 6. 트레이딩뷰 웹훅 연동 엔드포인트
+# 7. 기본 엔드포인트
 class AlertData(BaseModel):
     ticker: str
     signal: str
