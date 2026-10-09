@@ -34,18 +34,18 @@ def send_telegram_message(text: str, target_chat_id: str = None):
         print(f"Telegram Send Error: {e}")
         return str(e)
 
-# 3. 실시간 가격 조회 및 대화형 Gemini 분석 함수 (신규 밈/선물 전 단위 완벽 대응)
+# 3. 실시간 가격 조회 및 대화형 Gemini 분석 함수 (BULLA, BTW, VELVET 전수 대응)
 def analyze_requested_coin(ticker: str) -> str:
     raw_input = ticker.strip().upper().replace("USDT", "")
     
-    variants = [
-        raw_input,
-        f"1000{raw_input}",
-        f"1000000{raw_input}",
-        f"10000{raw_input}"
-    ]
+    # 바이낸스 선물의 모든 단위 표기법(기본, 1000, 10000, 1000000) 후보군 생성
+    prefixes = ["", "1000", "10000", "1000000"]
+    variants = []
+    for p in prefixes:
+        variants.append(f"{p}{raw_input}USDT")
+    # 사용자가 직접 1000을 붙여 입력했을 경우 대비
     if raw_input.startswith("1000"):
-        variants.append(raw_input.replace("1000", "", 1))
+        variants.append(f"{raw_input}USDT")
 
     last_price = None
     high_price = None
@@ -57,56 +57,61 @@ def analyze_requested_coin(ticker: str) -> str:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
     }
 
-    # 1차: DexScreener API (바이낸스 선물/DEX 상장 밈코인 실시간 체결가 1초 반영)
-    try:
-        dex_url = f"https://api.dexscreener.com/latest/dex/search?q={raw_input}"
-        dex_res = requests.get(dex_url, headers=headers, timeout=3)
-        if dex_res.status_code == 200:
-            pairs = dex_res.json().get("pairs", [])
-            if pairs:
-                p = pairs[0]
-                last_price = float(p.get("priceUsd", 0))
-                target_symbol = p.get("baseToken", {}).get("symbol", raw_input)
-                source = "글로벌 DEX/선물 피드"
-    except Exception:
-        pass
+    # 1차: 바이낸스 퍼블릭 Mirror 선물/현물 전수 검사
+    for sym in variants:
+        try:
+            bn_url = f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={sym}"
+            res = requests.get(bn_url, headers=headers, timeout=2)
+            if res.status_code == 200:
+                d = res.json()
+                p = float(d.get("lastPrice", 0))
+                if p > 0:
+                    last_price = p
+                    high_price = float(d.get("highPrice", 0))
+                    low_price = float(d.get("lowPrice", 0))
+                    target_symbol = sym.replace("USDT", "")
+                    source = "바이낸스"
+                    break
+        except Exception:
+            pass
 
-    # 2차: CryptoCompare (메이저 및 준메이저 알트코인)
+    # 2차: CryptoCompare 선물/현물 통합 조회
     if not last_price:
-        for v in variants:
+        for sym in [raw_input, f"1000{raw_input}", f"10000{raw_input}"]:
             try:
-                cc_url = f"https://min-api.cryptocompare.com/data/pricemultifull?fsyms={v}&tsyms=USD,USDT"
-                r = requests.get(cc_url, headers=headers, timeout=3)
+                cc_url = f"https://min-api.cryptocompare.com/data/pricemultifull?fsyms={sym}&tsyms=USDT,USD"
+                r = requests.get(cc_url, headers=headers, timeout=2)
                 if r.status_code == 200:
-                    res_data = r.json().get("RAW", {}).get(v, {})
-                    quote = res_data.get("USDT") or res_data.get("USD")
-                    if quote and quote.get("PRICE"):
+                    data = r.json().get("RAW", {}).get(sym, {})
+                    quote = data.get("USDT") or data.get("USD")
+                    if quote and float(quote.get("PRICE", 0)) > 0:
                         last_price = float(quote.get("PRICE"))
                         high_price = float(quote.get("HIGHDAY", 0))
                         low_price = float(quote.get("LOWDAY", 0))
-                        target_symbol = v
-                        source = "글로벌 거래소 시세"
+                        target_symbol = sym
+                        source = "글로벌 거래소"
                         break
             except Exception:
                 pass
 
-    # 3차: 바이낸스 퍼블릭 Mirror API 직접 매칭
+    # 3차: DexScreener (유동성 높은 상위 페어 필터링)
     if not last_price:
-        for v in variants:
-            sym = f"{v}USDT"
-            try:
-                bn_url = f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={sym}"
-                res = requests.get(bn_url, headers=headers, timeout=3)
-                if res.status_code == 200:
-                    d = res.json()
-                    last_price = float(d.get("lastPrice", 0))
-                    high_price = float(d.get("highPrice", 0))
-                    low_price = float(d.get("lowPrice", 0))
-                    target_symbol = v
-                    source = "바이낸스"
-                    break
-            except Exception:
-                pass
+        try:
+            dex_url = f"https://api.dexscreener.com/latest/dex/search?q={raw_input}"
+            dex_res = requests.get(dex_url, headers=headers, timeout=3)
+            if dex_res.status_code == 200:
+                pairs = dex_res.json().get("pairs", [])
+                # 유동성(liquidity)이 존재하는 유효 페어만 필터
+                valid_pairs = [p for p in pairs if float(p.get("priceUsd", 0)) > 0]
+                if valid_pairs:
+                    # 유동성 기준 정렬
+                    valid_pairs.sort(key=lambda x: float(x.get("liquidity", {}).get("usd", 0) or 0), reverse=True)
+                    best = valid_pairs[0]
+                    last_price = float(best.get("priceUsd", 0))
+                    target_symbol = best.get("baseToken", {}).get("symbol", raw_input)
+                    source = "DEX 통합 피드"
+        except Exception:
+            pass
 
     if not last_price:
         return f"⚠️ '{ticker}' 종목의 실시간 호가를 가져올 수 없습니다. 심볼명을 다시 확인해 주세요."
@@ -152,7 +157,7 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
             user_text = data["message"]["text"].strip()
 
             if user_text.startswith("/start"):
-                send_telegram_message("코인 심볼(예: BTC, ETH, AKE, BULLA)을 입력하시면 실시간 지지/저항, 예상 눌림목, 목표 익절가를 분석해 드립니다.", target_chat_id=chat_id)
+                send_telegram_message("코인 심볼(예: BTC, AKE, BULLA, BTW, VELVET)을 입력하시면 실시간 지지/저항, 예상 눌림목, 목표 익절가를 분석해 드립니다.", target_chat_id=chat_id)
                 return {"status": "ok"}
 
             ticker = user_text.replace("/분석", "").strip()
