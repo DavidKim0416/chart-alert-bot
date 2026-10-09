@@ -34,83 +34,100 @@ def send_telegram_message(text: str, target_chat_id: str = None):
         print(f"Telegram Send Error: {e}")
         return str(e)
 
-# 3. 실시간 가격 조회 및 대화형 Gemini 분석 함수 (전 종목 일괄 캐시 & 부분 일치 매칭)
+# 3. 실시간 가격 조회 및 대화형 Gemini 분석 함수 (선물 전종목 자동 매칭 완결판)
 def analyze_requested_coin(ticker: str) -> str:
-    clean_ticker = ticker.strip().upper().replace("USDT", "").replace("1000000", "").replace("10000", "").replace("1000", "")
+    user_query = ticker.strip().upper().replace("USDT", "")
     
     last_price = None
-    target_symbol = ticker.strip().upper()
+    target_symbol = ""
     source = ""
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json"
     }
 
-    # [1단계] 바이낸스 선물 전체 실시간 가격표 일괄 검색 (Cloudflare IP 우회 미러 포함)
-    binance_endpoints = [
+    # [1단계] 바이낸스 선물 전체 종목 실시간 가격 API (차단 우회 게이트웨이 다중 호출)
+    fapi_sources = [
         "https://fapi.binance.com/fapi/v1/ticker/price",
-        "https://data-api.binance.vision/api/v3/ticker/price",
+        "https://fapi.binance.vision/fapi/v1/ticker/price",
         "https://api.binance.com/api/v3/ticker/price"
     ]
 
-    for ep in binance_endpoints:
+    for endpoint in fapi_sources:
         try:
-            r = requests.get(ep, headers=headers, timeout=4)
-            if r.status_code == 200:
-                tickers_list = r.json()
-                # 1순위: 정확히 일치하거나 1000/10000/1000000 접두사가 붙은 USDT 종목 찾기
-                for item in tickers_list:
-                    sym = item.get("symbol", "")
-                    if not sym.endswith("USDT"):
-                        continue
-                    # 코인 본체 이름 추출 (예: 1000000BTWUSDT -> BTW)
-                    base_name = sym.replace("USDT", "").replace("1000000", "").replace("10000", "").replace("1000", "")
-                    if base_name == clean_ticker:
-                        last_price = float(item.get("price", 0))
-                        target_symbol = sym
-                        source = "바이낸스 실시간 호가"
+            res = requests.get(endpoint, headers=headers, timeout=4)
+            if res.status_code == 200:
+                tickers_list = res.json()
+                
+                # 1순위: 정확 매칭 (예: BTW -> 1000000BTWUSDT, 1000BTWUSDT, BTWUSDT)
+                exact_candidates = [
+                    f"{user_query}USDT",
+                    f"1000{user_query}USDT",
+                    f"10000{user_query}USDT",
+                    f"1000000{user_query}USDT"
+                ]
+                
+                # 티커 사전 생성
+                price_dict = {item.get("symbol", ""): item.get("price") for item in tickers_list}
+                
+                for candidate in exact_candidates:
+                    if candidate in price_dict:
+                        last_price = float(price_dict[candidate])
+                        target_symbol = candidate
+                        source = "바이낸스 선물"
                         break
+
+                # 2순위: 정확 매칭이 안 되면 심볼 내 단어 포함 여부 탐색 (부분 일치)
+                if not last_price:
+                    for sym, pr in price_dict.items():
+                        if sym.endswith("USDT") and user_query in sym:
+                            # 접두사/접미사 제거 후 순수 코인명 검증
+                            clean_base = sym.replace("USDT", "").replace("1000000", "").replace("10000", "").replace("1000", "")
+                            if clean_base == user_query:
+                                last_price = float(pr)
+                                target_symbol = sym
+                                source = "바이낸스 선물"
+                                break
+
             if last_price and last_price > 0:
                 break
         except Exception:
             pass
 
-    # [2단계] DexScreener 풀스캔 (신규 상장 및 DEX 유동성 기반 백업)
-    if not last_price or last_price == 0:
+    # [2단계] MEXC 거래소 API (바이낸스 미상장 또는 점검 시 보조)
+    if not last_price:
         try:
-            dex_url = f"https://api.dexscreener.com/latest/dex/search?q={clean_ticker}"
-            dex_res = requests.get(dex_url, headers=headers, timeout=3)
-            if dex_res.status_code == 200:
-                pairs = dex_res.json().get("pairs", [])
-                valid_pairs = [p for p in pairs if float(p.get("priceUsd", 0)) > 0]
-                if valid_pairs:
-                    valid_pairs.sort(key=lambda x: float(x.get("liquidity", {}).get("usd", 0) or 0), reverse=True)
-                    best = valid_pairs[0]
-                    last_price = float(best.get("priceUsd", 0))
-                    target_symbol = f"{best.get('baseToken', {}).get('symbol', clean_ticker)}USDT"
-                    source = "글로벌 DEX 체결가"
+            mexc_url = f"https://api.mexc.com/api/v3/ticker/price?symbol={user_query}USDT"
+            m_res = requests.get(mexc_url, headers=headers, timeout=3)
+            if m_res.status_code == 200:
+                p = float(m_res.json().get("price", 0))
+                if p > 0:
+                    last_price = p
+                    target_symbol = f"{user_query}USDT"
+                    source = "MEXC 실시간"
         except Exception:
             pass
 
-    # [3단계] CoinGecko 직접 티커 검색 백업
-    if not last_price or last_price == 0:
+    # [3단계] CoinGecko 직접 티커 검색 (신규 탈중앙 토큰 최종 보루)
+    if not last_price:
         try:
-            cg_res = requests.get(f"https://api.coingecko.com/api/v3/search?query={clean_ticker}", headers=headers, timeout=3)
+            cg_res = requests.get(f"https://api.coingecko.com/api/v3/search?query={user_query}", headers=headers, timeout=3)
             if cg_res.status_code == 200:
                 coins = cg_res.json().get("coins", [])
                 if coins:
                     cid = coins[0]["id"]
                     p_res = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={cid}&vs_currencies=usd", headers=headers, timeout=3)
                     p_val = p_res.json().get(cid, {}).get("usd")
-                    if p_val:
+                    if p_val and float(p_val) > 0:
                         last_price = float(p_val)
-                        target_symbol = f"{clean_ticker}USDT"
+                        target_symbol = f"{user_query}USDT"
                         source = "CoinGecko 피드"
         except Exception:
             pass
 
     if not last_price or last_price == 0:
-        return f"⚠️ '{ticker}' 종목의 실시간 호가를 찾을 수 없습니다. 영문 심볼명을 다시 확인해 주세요."
+        return f"⚠️ '{ticker}' 종목의 실시간 호가를 찾을 수 없습니다. 심볼명을 다시 확인해 주세요."
 
     prompt = f"""
 당신은 전문 가상자산 퀀트 트레이더입니다.
@@ -153,7 +170,7 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
             user_text = data["message"]["text"].strip()
 
             if user_text.startswith("/start"):
-                send_telegram_message("코인 심볼(예: BTC, BULLA, BTW, VELVET)을 입력하시면 실시간 지지/저항, 예상 눌림목, 목표 익절가를 분석해 드립니다.", target_chat_id=chat_id)
+                send_telegram_message("코인 심볼(예: BTC, BTW, VELVET, BULLA, AKE)을 입력하시면 실시간 지지/저항, 예상 눌림목, 목표 익절가를 분석해 드립니다.", target_chat_id=chat_id)
                 return {"status": "ok"}
 
             ticker = user_text.replace("/분석", "").strip()
