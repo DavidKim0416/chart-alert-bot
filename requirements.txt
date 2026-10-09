@@ -2,4 +2,4 @@ fastapi
 uvicorn
 google-generativeai
 requests
-python-dotenv
+python-telegram-bot
