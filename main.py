@@ -93,35 +93,49 @@ def market_scanner_loop():
                     if not k_data:
                         continue
                     
+                    # [캔들 데이터 구조: 1:시가, 2:고가, 3:저가, 4:종가]
                     open_price = float(k_data[0][1])
-                    if open_price == 0:
+                    high_price = float(k_data[0][2])
+                    low_price = float(k_data[0][3])
+                    
+                    if open_price == 0 or low_price == 0:
                         continue
 
-                    pct_change = ((last_price - open_price) / open_price) * 100
+                    # 1. 시가 대비 현재가 변동률 (일반 추세형 급등락)
+                    net_change = ((last_price - open_price) / open_price) * 100
+                    
+                    # 2. 1시간 내 최대 진폭 계산 (순간 급등락 롤러코스터 감지)
+                    volatility = ((high_price - low_price) / low_price) * 100
 
-                    # 15% 이상 급등 또는 -15% 이하 급락 확인
-                    if abs(pct_change) >= 15.0:
-                        # 동일 코인에 대해 2시간(7200초) 이내 재알림 방지
+                    trigger = False
+                    signal_text = ""
+
+                    # 조건 A: 순수 변동률이 +-15% 이상일 때
+                    if abs(net_change) >= 15.0:
+                        trigger = True
+                        direction = "🚀 1시간 급등" if net_change > 0 else "🩸 1시간 급락"
+                        signal_text = f"{direction} (변동률: {net_change:+.2f}%)"
+
+                    # 조건 B: 시가 대비 변동은 적으나, 순간적으로 15% 이상 튀었다가 빠진 경우 (스파이크)
+                    elif volatility >= 15.0:
+                        trigger = True
+                        signal_text = f"⚡ 1시간 내 거대 변동성/스파이크 발생 (고저 진폭: {volatility:.2f}%, 현재 변동: {net_change:+.2f}%)"
+
+                    if trigger:
                         if symbol in ALERTED_COINS and (current_time - ALERTED_COINS[symbol]) < 7200:
                             continue
 
-                        direction = "🚀 1시간 15% 이상 급등" if pct_change > 0 else "🩸 1시간 15% 이상 급락"
-                        signal_text = f"{direction} (변동률: {pct_change:.2f}%)"
-
-                        # Gemini 분석 실행
                         analysis = analyze_with_gemini(symbol, signal_text, str(last_price))
-
-                        # 텔레그램 메시지 조립 및 발송
                         msg = (
-                            f"🔔 *[전체 시장 변동성 긴급 감지]*\n"
-                            f"• 종목: `{symbol}`\n"
-                            f"• 상태: *{signal_text}*\n"
-                            f"• 현재가: `{last_price}`\n\n"
-                            f"📊 *Gemini AI 트레이딩 브리핑:*\n{analysis}"
+                            f"🔔 [변동성 긴급 감지]\n"
+                            f"• 종목: {symbol}\n"
+                            f"• 상태: {signal_text}\n"
+                            f"• 현재가: {last_price} (고가: {high_price} / 저가: {low_price})\n\n"
+                            f"📊 Gemini AI 분석:\n{analysis}"
                         )
                         send_telegram_message(msg)
                         ALERTED_COINS[symbol] = current_time
-                        time.sleep(2)  # 연속 발송 딜레이
+                        time.sleep(2)
 
         except Exception as e:
             print(f"Scanner Loop Error: {e}")
